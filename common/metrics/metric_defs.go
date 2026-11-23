@@ -1672,19 +1672,19 @@ var (
 	ElasticsearchDocumentParseFailuresCount           = NewCounterDef("elasticsearch_document_parse_failures_counter")
 	ElasticsearchMissingPreallocatedFieldMappings     = NewGaugeDef(
 		"elasticsearch_missing_preallocated_field_mappings",
-		WithDescription("Number of pre-allocated custom search attribute fields defined in cluster metadata that the Elasticsearch visibility index does not map. Run the Elasticsearch visibility schema upgrade when non-zero."),
+		WithDescription("Number of pre-allocated custom search attribute fields defined in cluster metadata that the Elasticsearch visibility index does not map with the expected type after the history service tried to add them at startup."),
 	)
-	ElasticsearchDocumentGenerateFailuresCount        = NewCounterDef("elasticsearch_document_generate_failures_counter")
-	ElasticsearchCustomOrderByClauseCount             = NewCounterDef("elasticsearch_custom_order_by_clause_counter")
-	CatchUpReadyShardCountGauge                       = NewGaugeDef("catchup_ready_shard_count")
-	CatchUpNotReadyShardCountGauge                    = NewGaugeDef("catchup_not_ready_shard_count")
-	HandoverReadyShardCountGauge                      = NewGaugeDef("handover_ready_shard_count")
-	ReplicatorMessages                                = NewCounterDef("replicator_messages")
-	ReplicatorFailures                                = NewCounterDef("replicator_errors")
-	ReplicatorLatency                                 = NewTimerDef("replicator_latency")
-	ReplicatorDLQFailures                             = NewCounterDef("replicator_dlq_enqueue_fails")
-	NamespaceReplicationEnqueueDLQCount               = NewCounterDef("namespace_replication_dlq_enqueue_requests")
-	NamespaceReplicationApplyOutcomes                 = NewCounterDef(
+	ElasticsearchDocumentGenerateFailuresCount = NewCounterDef("elasticsearch_document_generate_failures_counter")
+	ElasticsearchCustomOrderByClauseCount      = NewCounterDef("elasticsearch_custom_order_by_clause_counter")
+	CatchUpReadyShardCountGauge                = NewGaugeDef("catchup_ready_shard_count")
+	CatchUpNotReadyShardCountGauge             = NewGaugeDef("catchup_not_ready_shard_count")
+	HandoverReadyShardCountGauge               = NewGaugeDef("handover_ready_shard_count")
+	ReplicatorMessages                         = NewCounterDef("replicator_messages")
+	ReplicatorFailures                         = NewCounterDef("replicator_errors")
+	ReplicatorLatency                          = NewTimerDef("replicator_latency")
+	ReplicatorDLQFailures                      = NewCounterDef("replicator_dlq_enqueue_fails")
+	NamespaceReplicationEnqueueDLQCount        = NewCounterDef("namespace_replication_dlq_enqueue_requests")
+	NamespaceReplicationApplyOutcomes          = NewCounterDef(
 		"namespace_replication_apply_outcomes",
 		WithDescription("The number of terminal namespace metadata replication apply outcomes per target cluster."),
 	)

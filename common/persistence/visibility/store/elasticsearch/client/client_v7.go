@@ -441,30 +441,39 @@ func getLoggerOptions(logLevel string, logger log.Logger) []elastic.ClientOption
 	}
 }
 
+// FieldType returns the Elasticsearch field type used for a search attribute type, or an empty
+// string if the type is not supported.
+func FieldType(valueType enumspb.IndexedValueType) string {
+	switch valueType {
+	case enumspb.INDEXED_VALUE_TYPE_TEXT:
+		return "text"
+	case enumspb.INDEXED_VALUE_TYPE_KEYWORD, enumspb.INDEXED_VALUE_TYPE_KEYWORD_LIST:
+		return "keyword"
+	case enumspb.INDEXED_VALUE_TYPE_INT:
+		return "long"
+	case enumspb.INDEXED_VALUE_TYPE_DOUBLE:
+		return "scaled_float"
+	case enumspb.INDEXED_VALUE_TYPE_BOOL:
+		return "boolean"
+	case enumspb.INDEXED_VALUE_TYPE_DATETIME:
+		return "date_nanos"
+	default:
+		return ""
+	}
+}
+
 func buildMappingBody(mapping map[string]enumspb.IndexedValueType) map[string]any {
 	properties := make(map[string]any, len(mapping))
 	for fieldName, fieldType := range mapping {
-		var typeMap map[string]any
-		switch fieldType {
-		case enumspb.INDEXED_VALUE_TYPE_TEXT:
-			typeMap = map[string]any{"type": "text"}
-		case enumspb.INDEXED_VALUE_TYPE_KEYWORD, enumspb.INDEXED_VALUE_TYPE_KEYWORD_LIST:
-			typeMap = map[string]any{"type": "keyword"}
-		case enumspb.INDEXED_VALUE_TYPE_INT:
-			typeMap = map[string]any{"type": "long"}
-		case enumspb.INDEXED_VALUE_TYPE_DOUBLE:
-			typeMap = map[string]any{
-				"type":           "scaled_float",
-				"scaling_factor": 10000,
-			}
-		case enumspb.INDEXED_VALUE_TYPE_BOOL:
-			typeMap = map[string]any{"type": "boolean"}
-		case enumspb.INDEXED_VALUE_TYPE_DATETIME:
-			typeMap = map[string]any{"type": "date_nanos"}
+		esType := FieldType(fieldType)
+		if esType == "" {
+			continue
 		}
-		if typeMap != nil {
-			properties[fieldName] = typeMap
+		typeMap := map[string]any{"type": esType}
+		if fieldType == enumspb.INDEXED_VALUE_TYPE_DOUBLE {
+			typeMap["scaling_factor"] = 10000
 		}
+		properties[fieldName] = typeMap
 	}
 
 	body := map[string]any{

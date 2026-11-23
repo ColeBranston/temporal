@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"slices"
@@ -38,7 +39,7 @@ import (
 )
 
 const (
-	preallocatedFieldMappingsCheckTimeout = time.Minute
+	preallocatedFieldMappingsTimeout = time.Minute
 
 	delimiter = "~"
 
@@ -174,32 +175,33 @@ func NewVisibilityStore(
 		logger:                         logger,
 	}
 	if processorConfig != nil {
-		// Only the writers check, so that each cluster reports it once per history host
-		// instead of once per service.
+		// Only the writers (history hosts) register the mappings, so that every service doesn't
+		// need permission to update the index mapping.
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), preallocatedFieldMappingsCheckTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), preallocatedFieldMappingsTimeout)
 			defer cancel()
-			s.checkPreallocatedFieldMappings(ctx)
+			s.registerPreallocatedFieldMappings(ctx)
 		}()
 	}
 	return s, nil
 }
 
-// checkPreallocatedFieldMappings reports pre-allocated custom search attribute fields (eg:
-// Keyword01) that are defined in cluster metadata but not mapped in the Elasticsearch index.
-// Values of unmapped fields are stored but not indexed (the index mapping is not dynamic), so
-// queries on their aliases silently return nothing until the schema upgrade is run.
-func (s *VisibilityStore) checkPreallocatedFieldMappings(ctx context.Context) {
+// registerPreallocatedFieldMappings adds the Elasticsearch index mappings of the pre-allocated
+// custom search attribute fields (eg: Keyword01) that cluster metadata defines but the index
+// doesn't map yet. The index mapping is not dynamic, so values of unmapped fields are stored but
+// not indexed, and queries on their namespace aliases silently return nothing.
+// It's best effort: failures are logged and reported by a metric, and don't block startup.
+func (s *VisibilityStore) registerPreallocatedFieldMappings(ctx context.Context) {
 	saTypeMap, err := s.searchAttributesProvider.GetSearchAttributes(s.index, false)
 	if err != nil {
-		s.logger.Warn("Unable to check Elasticsearch mappings of pre-allocated custom search attributes.",
+		s.logger.Warn("Unable to register Elasticsearch mappings of pre-allocated custom search attributes.",
 			tag.ESIndex(s.index), tag.Error(err))
 		return
 	}
-	var preallocatedFields []string
+	preallocatedFields := make(map[string]enumspb.IndexedValueType)
 	for name, valueType := range saTypeMap.Custom() {
 		if sadefs.IsPreallocatedCSAFieldName(name, valueType) {
-			preallocatedFields = append(preallocatedFields, name)
+			preallocatedFields[name] = valueType
 		}
 	}
 	if len(preallocatedFields) == 0 {
@@ -208,33 +210,54 @@ func (s *VisibilityStore) checkPreallocatedFieldMappings(ctx context.Context) {
 
 	mapping, err := s.esClient.GetMapping(ctx, s.index)
 	if err != nil {
-		s.logger.Warn("Unable to check Elasticsearch mappings of pre-allocated custom search attributes.",
+		s.logger.Warn("Unable to register Elasticsearch mappings of pre-allocated custom search attributes.",
 			tag.ESIndex(s.index), tag.Error(err))
 		return
 	}
 	if len(mapping) == 0 {
 		// The mapping is keyed by the concrete index name, so it is empty when the configured
-		// index is an alias. The fields can't be checked in that case.
+		// index is an alias. The existing fields can't be checked in that case.
+		s.logger.Warn("Unable to register Elasticsearch mappings of pre-allocated custom search attributes: "+
+			"the index mapping is empty or the index is an alias.", tag.ESIndex(s.index))
 		return
 	}
 
-	var missingFields []string
-	for _, field := range preallocatedFields {
-		if _, ok := mapping[field]; !ok {
-			missingFields = append(missingFields, field)
+	missingFields := make(map[string]enumspb.IndexedValueType)
+	var conflictingFields []string
+	for name, valueType := range preallocatedFields {
+		esType, ok := mapping[name]
+		if !ok {
+			missingFields[name] = valueType
+			continue
+		}
+		if esType != client.FieldType(valueType) {
+			// Eg: a custom search attribute with the same name and another type was registered
+			// before the fields were pre-allocated. Changing the type of a field is not possible.
+			conflictingFields = append(conflictingFields, name)
 		}
 	}
-	metrics.ElasticsearchMissingPreallocatedFieldMappings.With(s.metricsHandler).Record(float64(len(missingFields)))
-	if len(missingFields) == 0 {
-		return
+	if len(conflictingFields) > 0 {
+		slices.Sort(conflictingFields)
+		s.logger.Warn("Elasticsearch visibility index maps pre-allocated custom search attribute fields with another type. "+
+			"They can't be used through namespace aliases.",
+			tag.ESIndex(s.index), tag.NewStringsTag("conflicting-fields", conflictingFields))
 	}
-	slices.Sort(missingFields)
-	s.logger.Error(
-		"Elasticsearch visibility index does not map pre-allocated custom search attribute fields. "+
-			"Run the Elasticsearch visibility schema upgrade, otherwise values of these fields are not indexed.",
-		tag.ESIndex(s.index),
-		tag.NewStringsTag("missing-fields", missingFields),
-	)
+
+	unmappedFields := len(conflictingFields)
+	if len(missingFields) > 0 {
+		missingFieldNames := slices.Sorted(maps.Keys(missingFields))
+		err := s.AddSearchAttributes(ctx, &manager.AddSearchAttributesRequest{SearchAttributes: missingFields})
+		if err != nil {
+			unmappedFields += len(missingFields)
+			s.logger.Error("Unable to add Elasticsearch mappings of pre-allocated custom search attributes. "+
+				"Values of these fields are not indexed until the mappings are added.",
+				tag.ESIndex(s.index), tag.NewStringsTag("missing-fields", missingFieldNames), tag.Error(err))
+		} else {
+			s.logger.Info("Added Elasticsearch mappings of pre-allocated custom search attributes.",
+				tag.ESIndex(s.index), tag.NewStringsTag("added-fields", missingFieldNames))
+		}
+	}
+	metrics.ElasticsearchMissingPreallocatedFieldMappings.With(s.metricsHandler).Record(float64(unmappedFields))
 }
 
 func (s *VisibilityStore) Close() {
