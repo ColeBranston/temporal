@@ -74,8 +74,13 @@ func (w *Workflow) LifecycleState(
 
 // IsExecutionSkippable reports whether CHASM-owned workflow work permits time skipping.
 // Mutable State checks the workflow's legacy state and in-flight work separately.
-func (w *Workflow) IsExecutionSkippable(_ chasm.Context) bool {
-	return w.pendingNexusOperationCount() == 0
+func (w *Workflow) IsExecutionSkippable(ctx chasm.Context) bool {
+	for _, operationField := range w.Operations {
+		if !operationField.Get(ctx).AllowsTimeSkipping(ctx) {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *Workflow) ContextMetadata(_ chasm.Context) map[string]string {

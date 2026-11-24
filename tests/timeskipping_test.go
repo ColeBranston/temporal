@@ -1240,6 +1240,86 @@ func (s *TimeSkippingTestSuite) TestTimeSkipping_PendingCHASMNexusOperationBlock
 	s.True(hasEventType(history, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED))
 }
 
+// TestTimeSkipping_CHASMNexusRetryBackoff verifies that workflow time advances to CHASM Nexus
+// invocation retry deadlines while scheduled and started invocations remain in-flight work.
+func (s *TimeSkippingTestSuite) TestTimeSkipping_CHASMNexusRetryBackoff() {
+	const retryInterval = time.Minute
+	env := newNexusTestEnv(s.T(), true,
+		testcore.WithDynamicConfig(dynamicconfig.WorkflowTimeSkippingEnabled, true),
+		testcore.WithDynamicConfig(dynamicconfig.EnableChasm, true),
+		testcore.WithDynamicConfig(chasmnexus.Enabled, true),
+		testcore.WithDynamicConfig(chasmnexus.EnableChasmWorkflowOperations, true),
+		testcore.WithDynamicConfig(chasmnexus.ChasmWorkflowOperationsRolloutPercent, 100),
+		testcore.WithDynamicConfig(chasmnexus.RetryPolicy, chasmnexus.RetryPolicyConfig{
+			InitialInterval: retryInterval,
+			MaxInterval:     retryInterval,
+		}),
+	)
+	tv := testvars.New(s.T())
+
+	var attempts atomic.Int32
+	handler := nexustest.Handler{
+		OnStartOperation: func(
+			_ context.Context,
+			_ string,
+			_ string,
+			_ *nexus.LazyValue,
+			_ nexus.StartOperationOptions,
+		) (nexus.HandlerStartOperationResult[any], error) {
+			if attempts.Add(1) <= 2 {
+				return nil, nexus.NewHandlerErrorf(nexus.HandlerErrorTypeInternal, "intentional retryable error")
+			}
+			return &nexus.HandlerStartOperationResultSync[any]{Value: "ok"}, nil
+		},
+	}
+	endpointName := env.createRandomExternalNexusServer(s.Context(), s.T(), handler)
+	runID := s.startWorkflowWithTimeSkipping(env.TestEnv, tv, 4*time.Hour)
+	poller := taskpoller.New(s.T(), env.FrontendClient(), env.Namespace().String())
+
+	_, err := poller.PollAndHandleWorkflowTask(tv, func(_ *workflowservice.PollWorkflowTaskQueueResponse) (*workflowservice.RespondWorkflowTaskCompletedRequest, error) {
+		return &workflowservice.RespondWorkflowTaskCompletedRequest{Commands: []*commandpb.Command{
+			{
+				CommandType: enumspb.COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION,
+				Attributes: &commandpb.Command_ScheduleNexusOperationCommandAttributes{
+					ScheduleNexusOperationCommandAttributes: &commandpb.ScheduleNexusOperationCommandAttributes{
+						Endpoint:  endpointName,
+						Service:   "service",
+						Operation: "operation",
+						Input:     testcore.MustToPayload(s.T(), "input"),
+					},
+				},
+			},
+			startTimerCmd("timer-1", time.Hour),
+		}}, nil
+	})
+	s.Require().NoError(err)
+
+	_, err = poller.PollAndHandleWorkflowTask(tv, taskpoller.DrainWorkflowTask)
+	s.Require().NoError(err)
+	_, err = poller.PollAndHandleWorkflowTask(tv, func(_ *workflowservice.PollWorkflowTaskQueueResponse) (*workflowservice.RespondWorkflowTaskCompletedRequest, error) {
+		return &workflowservice.RespondWorkflowTaskCompletedRequest{
+			Commands: []*commandpb.Command{completeWorkflowCmd()},
+		}, nil
+	})
+	s.Require().NoError(err)
+
+	history := env.GetHistory(env.Namespace().String(), &commonpb.WorkflowExecution{
+		WorkflowId: tv.WorkflowID(),
+		RunId:      runID,
+	})
+	s.GreaterOrEqual(int(attempts.Load()), 3, "CHASM Nexus operation must retry twice")
+	nexusScheduledIdx := indexOfEventType(history, enumspb.EVENT_TYPE_NEXUS_OPERATION_SCHEDULED)
+	nexusCompletedIdx := indexOfEventType(history, enumspb.EVENT_TYPE_NEXUS_OPERATION_COMPLETED)
+	transitionIdx := indexOfEventType(history, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TIME_SKIPPING_TRANSITIONED)
+	s.Greater(transitionIdx, nexusScheduledIdx)
+	s.Less(transitionIdx, nexusCompletedIdx,
+		"CHASM Nexus retry time skipping must happen before operation completion")
+	s.GreaterOrEqual(len(timeSkippingTransitions(history)), 3,
+		"expected two CHASM Nexus retry skips and one user-timer skip")
+	s.True(hasEventType(history, enumspb.EVENT_TYPE_TIMER_FIRED))
+	s.True(hasEventType(history, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED))
+}
+
 // TestTimeSkipping_StartWithDelay_NoBound verifies that time-skipping with no
 // bound shifts a WorkflowStartDelay backoff into the near-now wall-clock window:
 // the first WT becomes available immediately instead of waiting wallStart + 1h.
